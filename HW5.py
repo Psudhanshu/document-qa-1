@@ -1,78 +1,89 @@
-import requests
 import streamlit as st
 from openai import OpenAI
+import pandas as pd
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
-# Set up the Streamlit app
-st.title("Weather Suggestion Bot with OpenAI")
+# Path to the directory where your course data is stored
+course_data_path = "/workspaces/document-qa-1/course_data.csv"
 
-# Function to fetch current weather information from OpenWeather API
-def fetch_weather_data(city, api_key):
-    # Clean the input city name
-    city = city.split(",")[0].strip() if "," in city else city.strip()
-
-    base_url = "https://api.openweathermap.org/data/2.5/"
-    endpoint = f"weather?q={city}&appid={api_key}"
-    full_url = base_url + endpoint
-
-    response = requests.get(full_url)
-    weather_info = response.json()
-
-    if response.status_code != 200:
-        st.error("Unable to retrieve weather data. Please verify the city name.")
+# Load the course data from the CSV file
+def load_course_data(path):
+    try:
+        df = pd.read_csv(path)
+        return df
+    except FileNotFoundError:
+        st.error(f"File not found: {path}")
         return None
 
-    # Convert temperature from Kelvin to Celsius
-    main_data = weather_info['main']
-    return {
-        "city": city,
-        "temperature": round(main_data['temp'] - 273.15, 2),
-        "feels_like": round(main_data['feels_like'] - 273.15, 2),
-        "min_temp": round(main_data['temp_min'] - 273.15, 2),
-        "max_temp": round(main_data['temp_max'] - 273.15, 2),
-        "humidity": round(main_data['humidity'], 2)
-    }
+# Load the course data
+course_data = load_course_data(course_data_path)
 
-# Initialize OpenAI API client
-def initialize_openai_client():
-    return OpenAI(api_key=st.secrets["open_api_key"])
+# Ensure the data loaded successfully
+if course_data is not None:
+    course_names = course_data['course_name'].tolist()
+    course_descriptions = course_data['course_description'].tolist()
 
-# Create a response from the OpenAI chatbot
-def create_chatbot_response(user_input, weather_info):
-    client = initialize_openai_client()
+    # Vectorize the course descriptions using TF-IDF
+    vectorizer = TfidfVectorizer()
+    course_vectors = vectorizer.fit_transform(course_descriptions)
 
-    # Create a context-rich message
-    context = [
-        {"role": "system", "content": f"The weather in {weather_info['city']} is:\n"
-                                      f"Temperature: {weather_info['temperature']}°C\n"
-                                      f"Feels Like: {weather_info['feels_like']}°C\n"
-                                      f"Min Temperature: {weather_info['min_temp']}°C\n"
-                                      f"Max Temperature: {weather_info['max_temp']}°C\n"
-                                      f"Humidity: {weather_info['humidity']}%"},
-        {"role": "user", "content": user_input}
-    ]
+    # Set up the Streamlit app
+    st.title("Short-Term Memory Chatbot for Courses")
 
-    response = client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=context
-    )
+    # Function to perform vector search on the course data
+    def vector_search(query, course_vectors, course_names):
+        query_vec = vectorizer.transform([query])
+        similarity_scores = cosine_similarity(query_vec, course_vectors).flatten()
+        # Find the course with the highest similarity score
+        best_match_index = similarity_scores.argmax()
+        if similarity_scores[best_match_index] > 0.1:  # Threshold to find a meaningful match
+            return course_names[best_match_index], similarity_scores[best_match_index]
+        else:
+            return None, 0
 
-    return response.choices[0].message.content
+    # Initialize OpenAI API client
+    def initialize_openai_client():
+        return OpenAI(api_key=st.secrets["open_api_key"])
 
-# User input for city name
-city_input = st.text_input("Enter a city (e.g., London, England):", "London, England")
+    # Create a response from the OpenAI chatbot
+    def create_chatbot_response(user_input, course_name, similarity_score):
+        client = initialize_openai_client()
 
-if city_input:
-    weather_info = fetch_weather_data(city_input, st.secrets["weather_api_key"])
+        # Build the context with the relevant course info
+        context = [
+            {"role": "system", "content": f"The most relevant course based on your query is: {course_name} "
+                                          f"(Similarity Score: {round(similarity_score, 2)})"},
+            {"role": "user", "content": user_input}
+        ]
 
-    if weather_info:
-        st.write("### Current Weather Details:")
-        st.write(weather_info)
+        # Get a completion from OpenAI GPT
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=context
+        )
 
-        # User question for the chatbot
-        user_query = st.text_area("Ask about the weather (e.g., What should I wear?):", "What should I wear today?")
+        return response.choices[0].message.content
 
-        if user_query:
-            with st.spinner("Generating a response..."):
-                chatbot_reply = create_chatbot_response(user_query, weather_info)
-                st.write("### Chatbot Response:")
-                st.write(chatbot_reply)
+    # User input for query (related to courses)
+    query_input = st.text_input("Enter your question about courses:")
+
+    if query_input:
+        # Perform vector search
+        best_match, similarity = vector_search(query_input, course_vectors, course_names)
+
+        if best_match:
+            st.write(f"### Best Match: {best_match} (Similarity: {similarity:.2f})")
+
+            # User question for the chatbot
+            user_query = st.text_area("Ask a follow-up question:", "What should I focus on in this course?")
+
+            if user_query:
+                with st.spinner("Generating a response..."):
+                    chatbot_reply = create_chatbot_response(user_query, best_match, similarity)
+                    st.write("### Chatbot Response:")
+                    st.write(chatbot_reply)
+        else:
+            st.write("No relevant courses found for your query.")
+else:
+    st.error("Failed to load course data.")
