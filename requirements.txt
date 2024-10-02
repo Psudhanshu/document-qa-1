@@ -5,6 +5,4 @@ google-generativeai
 langchain
 anthropic
 pandas
-sklearn
-cosine_similarity
-TfidfVectorizer
+scikit-learn
